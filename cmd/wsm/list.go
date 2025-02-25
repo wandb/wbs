@@ -3,13 +3,14 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"sort"
+	"strings"
 
-	"github.com/Masterminds/semver/v3"
+	semverlib "github.com/Masterminds/semver/v3"
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbletea"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 	"github.com/wandb/wsm/pkg/deployer"
@@ -58,7 +59,7 @@ func getMostRecentTag(repository string) (string, error) {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", fmt.Errorf("error reading response body: %v", err)
 	}
@@ -70,12 +71,22 @@ func getMostRecentTag(repository string) (string, error) {
 		return "", fmt.Errorf("error unmarshalling JSON: %v", err)
 	}
 
-	// Extract tags and filter out "latest"
-	var tags []*semver.Version
+	// Extract tags and filter out "latest" and daily tags for wandb repos
+	var tags []*semverlib.Version
 	if results, ok := result["results"].([]interface{}); ok {
 		for _, r := range results {
-			if tag, ok := r.(map[string]interface{})["name"].(string); ok && tag != "latest" {
-				version, err := semver.NewVersion(tag)
+			if tag, ok := r.(map[string]interface{})["name"].(string); ok {
+				// Skip "latest" tag
+				if tag == "latest" {
+					continue
+				}
+				
+				// Skip daily tags only for wandb repositories
+				if strings.HasPrefix(repository, "wandb/") && strings.Contains(tag, "daily") {
+					continue
+				}
+				
+				version, err := semverlib.NewVersion(tag)
 				if err == nil {
 					tags = append(tags, version)
 				}
@@ -84,7 +95,7 @@ func getMostRecentTag(repository string) (string, error) {
 	}
 
 	// Sort the tags in descending order
-	sort.Sort(sort.Reverse(semver.Collection(tags)))
+	sort.Sort(sort.Reverse(semverlib.Collection(tags)))
 
 	// Return the most recent tag
 	if len(tags) == 0 {
@@ -102,7 +113,7 @@ func ListCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			fmt.Println(lipgloss.NewStyle().
 				Bold(true).
-				Foreground(lipgloss.Color("14")).Render("📦 Starting the process to list all images required for deployment..."))
+				Foreground(lipgloss.Color("14")).Render("📦 Listing all images required for deployment..."))
 
 			// Initialize spinner
 			sp := spinner.New()
@@ -113,7 +124,8 @@ func ListCmd() *cobra.Command {
 
 			// Run spinner in a separate goroutine
 			go func() {
-				if err := p.Start(); err != nil {
+				_, err := p.Run()
+				if err != nil {
 					fmt.Println("Error running spinner:", err)
 				}
 			}()
@@ -162,8 +174,9 @@ func ListCmd() *cobra.Command {
 			}
 
 			fmt.Println(listStyle.Render("W&B Images:"))
-			for _, img := range utils.RemoveDuplicates(wandbImgs) {
-				fmt.Println(itemStyle.Render(img))
+			// Apply semver compatibility filter to wandb images
+			for _, img := range utils.EnsureWandbSemverCompatibleImages(utils.RemoveDuplicates(wandbImgs)) {
+				fmt.Println("  " + img)
 			}
 
 			fmt.Println(footerStyle.Render("Here are the images required to deploy W&B. Please ensure these images are available in your internal container registry and update the values.yaml accordingly.\n"))
